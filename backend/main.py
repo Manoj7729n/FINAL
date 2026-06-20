@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -16,25 +15,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS Configuration
-frontend_origins = (
-    os.getenv("FRONTEND_URLS")
-    or os.getenv("FRONTEND_URL")
-    or "http://localhost:3000,http://localhost:5173"
-)
-
-if isinstance(frontend_origins, str):
-    origins_list = [
-        o.strip()
-        for o in frontend_origins.split(",")
-        if o.strip()
-    ]
-else:
-    origins_list = list(frontend_origins)
-
+# Fixed CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins_list,
+    allow_origins=[
+        "https://final-frontend-wipi.onrender.com",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,6 +78,7 @@ async def root():
         "message": "RAG Knowledge Assistant API",
         "status": "running"
     }
+
 
 @app.get("/health")
 async def health_check():
@@ -183,29 +172,25 @@ async def query_knowledge_base(request: QueryRequest):
         seen = set()
 
         for chunk in relevant_chunks:
-            source_key = (
-                f"{chunk['filename']}_{chunk.get('page', 0)}"
-            )
+            source_key = f"{chunk['filename']}_{chunk.get('page', 0)}"
 
             if source_key not in seen:
                 seen.add(source_key)
 
-                sources.append(
-                    {
-                        "filename": chunk["filename"],
-                        "page": chunk.get("page"),
-                        "chunk_index": chunk.get("chunk_index", 0),
-                        "relevance_score": round(
-                            chunk.get("score", 0),
-                            4
-                        ),
-                        "excerpt": (
-                            chunk["text"][:200] + "..."
-                            if len(chunk["text"]) > 200
-                            else chunk["text"]
-                        ),
-                    }
-                )
+                sources.append({
+                    "filename": chunk["filename"],
+                    "page": chunk.get("page"),
+                    "chunk_index": chunk.get("chunk_index", 0),
+                    "relevance_score": round(
+                        chunk.get("score", 0),
+                        4
+                    ),
+                    "excerpt": (
+                        chunk["text"][:200] + "..."
+                        if len(chunk["text"]) > 200
+                        else chunk["text"]
+                    ),
+                })
 
         return QueryResponse(
             answer=answer,
