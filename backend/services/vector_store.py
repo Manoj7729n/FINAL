@@ -1,100 +1,91 @@
-
 import os
 import pickle
-import numpy as np
 from typing import List, Dict
-import faiss
-from sentence_transformers import SentenceTransformer
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 class VectorStore:
     def __init__(self, persist_dir: str = "./vectorstore"):
         self.persist_dir = persist_dir
-        self.index_path = os.path.join(persist_dir, "faiss.index")
         self.metadata_path = os.path.join(persist_dir, "metadata.pkl")
 
-        # Lazy loading - model is NOT loaded during startup
-        self.model = None
-
-        self.dimension = 384
-        self.index = None
-        self.metadata: List[Dict] = []
-
         os.makedirs(persist_dir, exist_ok=True)
-        self._load_or_create_index()
 
-    def get_model(self):
-        """Load model only when needed"""
-        if self.model is None:
-            self.model = SentenceTransformer("all-MiniLM-L6-v2")
-        return self.model
+        self.metadata: List[Dict] = []
+        self.vectorizer = TfidfVectorizer(stop_words="english")
+        self.document_vectors = None
 
-    def _load_or_create_index(self):
-        if os.path.exists(self.index_path) and os.path.exists(self.metadata_path):
-            self.index = faiss.read_index(self.index_path)
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.metadata_path):
             with open(self.metadata_path, "rb") as f:
                 self.metadata = pickle.load(f)
-        else:
-            self.index = faiss.IndexFlatIP(self.dimension)
-            self.metadata = []
 
-    def _save_index(self):
-        faiss.write_index(self.index, self.index_path)
+            if self.metadata:
+                texts = [m["text"] for m in self.metadata]
+                self.document_vectors = self.vectorizer.fit_transform(texts)
+
+    def _save(self):
         with open(self.metadata_path, "wb") as f:
             pickle.dump(self.metadata, f)
 
-    def _encode(self, texts: List[str]) -> np.ndarray:
-        model = self.get_model()
-
-        embeddings = model.encode(
-            texts,
-            normalize_embeddings=True,
-            show_progress_bar=False
-        )
-
-        return embeddings.astype(np.float32)
+    def _rebuild_index(self):
+        if self.metadata:
+            texts = [m["text"] for m in self.metadata]
+            self.document_vectors = self.vectorizer.fit_transform(texts)
+        else:
+            self.document_vectors = None
 
     def add_documents(self, chunks: List[Dict], filename: str) -> List[int]:
-        texts = [chunk["text"] for chunk in chunks]
-        embeddings = self._encode(texts)
-
         start_idx = len(self.metadata)
-        self.index.add(embeddings)
 
         doc_ids = []
+
         for i, chunk in enumerate(chunks):
             doc_id = start_idx + i
+
             self.metadata.append({
                 **chunk,
                 "doc_id": doc_id
             })
+
             doc_ids.append(doc_id)
 
-        self._save_index()
+        self._rebuild_index()
+        self._save()
+
         return doc_ids
 
     def search(self, query: str, top_k: int = 5) -> List[Dict]:
-        if self.index.ntotal == 0:
+        if not self.metadata or self.document_vectors is None:
             return []
 
-        query_embedding = self._encode([query])
+        query_vector = self.vectorizer.transform([query])
 
-        actual_k = min(top_k, self.index.ntotal)
-        scores, indices = self.index.search(query_embedding, actual_k)
+        similarities = cosine_similarity(
+            query_vector,
+            self.document_vectors
+        )[0]
+
+        ranked_indices = similarities.argsort()[::-1][:top_k]
 
         results = []
 
-        for score, idx in zip(scores[0], indices[0]):
-            if idx != -1 and 0 <= idx < len(self.metadata):
-                result = self.metadata[idx].copy()
-                result["score"] = float(score)
-                results.append(result)
+        for idx in ranked_indices:
+            score = float(similarities[idx])
 
-        results.sort(key=lambda x: x["score"], reverse=True)
+            result = self.metadata[idx].copy()
+            result["score"] = score
+
+            results.append(result)
+
         return results
 
     def get_document_count(self) -> int:
-        return self.index.ntotal if self.index else 0
+        return len(self.metadata)
 
     def list_documents(self) -> List[Dict]:
         seen_files = {}
@@ -126,44 +117,25 @@ class VectorStore:
         return result
 
     def delete_document(self, filename: str) -> bool:
-        indices_to_remove = [
-            i for i, m in enumerate(self.metadata)
-            if m.get("filename") == filename
-        ]
-
-        if not indices_to_remove:
-            return False
-
         new_metadata = [
             m for m in self.metadata
             if m.get("filename") != filename
         ]
 
-        keep_indices = [
-            i for i in range(len(self.metadata))
-            if i not in set(indices_to_remove)
-        ]
-
-        if keep_indices:
-            all_texts = [m["text"] for m in self.metadata]
-            all_embeddings = self._encode(all_texts)
-
-            kept_embeddings = all_embeddings[keep_indices]
-
-            self.index = faiss.IndexFlatIP(self.dimension)
-            self.index.add(kept_embeddings)
-        else:
-            self.index = faiss.IndexFlatIP(self.dimension)
+        if len(new_metadata) == len(self.metadata):
+            return False
 
         self.metadata = new_metadata
 
         for i, meta in enumerate(self.metadata):
             meta["doc_id"] = i
 
-        self._save_index()
+        self._rebuild_index()
+        self._save()
+
         return True
 
     def clear_all(self):
-        self.index = faiss.IndexFlatIP(self.dimension)
         self.metadata = []
-        self._save_index()
+        self.document_vectors = None
+        self._save()
