@@ -1,4 +1,4 @@
-```python
+
 import os
 import pickle
 import numpy as np
@@ -167,4 +167,3 @@ class VectorStore:
         self.index = faiss.IndexFlatIP(self.dimension)
         self.metadata = []
         self._save_index()
-```
