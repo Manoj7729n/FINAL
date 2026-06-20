@@ -1,9 +1,10 @@
+```python
 import os
 import pickle
 import numpy as np
-from typing import List, Dict, Optional
-from sentence_transformers import SentenceTransformer
+from typing import List, Dict
 import faiss
+from sentence_transformers import SentenceTransformer
 
 
 class VectorStore:
@@ -11,13 +12,22 @@ class VectorStore:
         self.persist_dir = persist_dir
         self.index_path = os.path.join(persist_dir, "faiss.index")
         self.metadata_path = os.path.join(persist_dir, "metadata.pkl")
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        # Lazy loading - model is NOT loaded during startup
+        self.model = None
+
         self.dimension = 384
         self.index = None
         self.metadata: List[Dict] = []
 
         os.makedirs(persist_dir, exist_ok=True)
         self._load_or_create_index()
+
+    def get_model(self):
+        """Load model only when needed"""
+        if self.model is None:
+            self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        return self.model
 
     def _load_or_create_index(self):
         if os.path.exists(self.index_path) and os.path.exists(self.metadata_path):
@@ -34,7 +44,14 @@ class VectorStore:
             pickle.dump(self.metadata, f)
 
     def _encode(self, texts: List[str]) -> np.ndarray:
-        embeddings = self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        model = self.get_model()
+
+        embeddings = model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=False
+        )
+
         return embeddings.astype(np.float32)
 
     def add_documents(self, chunks: List[Dict], filename: str) -> List[int]:
@@ -61,10 +78,12 @@ class VectorStore:
             return []
 
         query_embedding = self._encode([query])
+
         actual_k = min(top_k, self.index.ntotal)
         scores, indices = self.index.search(query_embedding, actual_k)
 
         results = []
+
         for score, idx in zip(scores[0], indices[0]):
             if idx != -1 and 0 <= idx < len(self.metadata):
                 result = self.metadata[idx].copy()
@@ -79,34 +98,56 @@ class VectorStore:
 
     def list_documents(self) -> List[Dict]:
         seen_files = {}
+
         for meta in self.metadata:
             fname = meta.get("filename", "unknown")
+
             if fname not in seen_files:
-                seen_files[fname] = {"filename": fname, "chunks": 0, "pages": set()}
+                seen_files[fname] = {
+                    "filename": fname,
+                    "chunks": 0,
+                    "pages": set()
+                }
+
             seen_files[fname]["chunks"] += 1
+
             if meta.get("page"):
                 seen_files[fname]["pages"].add(meta["page"])
 
         result = []
+
         for fname, info in seen_files.items():
             result.append({
                 "filename": fname,
                 "chunks": info["chunks"],
                 "pages": max(info["pages"]) if info["pages"] else None
             })
+
         return result
 
     def delete_document(self, filename: str) -> bool:
-        indices_to_remove = [i for i, m in enumerate(self.metadata) if m.get("filename") == filename]
+        indices_to_remove = [
+            i for i, m in enumerate(self.metadata)
+            if m.get("filename") == filename
+        ]
+
         if not indices_to_remove:
             return False
 
-        new_metadata = [m for m in self.metadata if m.get("filename") != filename]
-        keep_indices = [i for i in range(len(self.metadata)) if i not in set(indices_to_remove)]
+        new_metadata = [
+            m for m in self.metadata
+            if m.get("filename") != filename
+        ]
+
+        keep_indices = [
+            i for i in range(len(self.metadata))
+            if i not in set(indices_to_remove)
+        ]
 
         if keep_indices:
             all_texts = [m["text"] for m in self.metadata]
             all_embeddings = self._encode(all_texts)
+
             kept_embeddings = all_embeddings[keep_indices]
 
             self.index = faiss.IndexFlatIP(self.dimension)
@@ -115,6 +156,7 @@ class VectorStore:
             self.index = faiss.IndexFlatIP(self.dimension)
 
         self.metadata = new_metadata
+
         for i, meta in enumerate(self.metadata):
             meta["doc_id"] = i
 
@@ -125,3 +167,4 @@ class VectorStore:
         self.index = faiss.IndexFlatIP(self.dimension)
         self.metadata = []
         self._save_index()
+```
