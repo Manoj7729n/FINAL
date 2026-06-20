@@ -91,7 +91,6 @@ async def root():
         "status": "running"
     }
 
-
 @app.get("/health")
 async def health_check():
     return {
